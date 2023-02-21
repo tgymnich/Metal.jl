@@ -950,6 +950,14 @@ function mtSharedEventNewHandle(event)
     ccall((:mtSharedEventNewHandle, libcmt), Ptr{MtSharedEventHandle}, (Ptr{MtSharedEvent},), event)
 end
 
+function mtSharedEventWait(event, value)
+    ccall((:mtSharedEventWait, libcmt), Cvoid, (Ptr{MtSharedEvent}, NsUInteger), event, value)
+end
+
+function mtSharedEventSignal(event, value)
+    ccall((:mtSharedEventSignal, libcmt), Cvoid, (Ptr{MtSharedEvent}, NsUInteger), event, value)
+end
+
 @cenum MtCPUCacheMode::UInt32 begin
     MtCPUCacheModeDefaultCache = 0
     MtCPUCacheModeWriteCombined = 1

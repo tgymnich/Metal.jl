@@ -80,3 +80,27 @@ mtSharedEventNotifyListener(MtSharedEvent *event, MtSharedEventListener *listene
 										atValue:val
 										block: (MTLSharedEventNotificationBlock) block];
 }
+
+MT_EXPORT
+MT_API_AVAILABLE(mt_macos(10.14), mt_ios(12.0))
+void
+mtSharedEventWait(MtSharedEvent *event, uint64_t val) {
+  dispatch_semaphore_t sema = dispatch_semaphore_create(0);
+  dispatch_queue_t queue = dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0);
+  MTLSharedEventListener * sharedEventListener = [[MTLSharedEventListener alloc] initWithDispatchQueue:queue];
+
+  [(id<MTLSharedEvent>)event notifyListener:sharedEventListener
+                       				atValue:val
+                         			  block:^(id<MTLSharedEvent> event, uint64_t value) {
+    dispatch_semaphore_signal(sema);
+  }];
+    
+  dispatch_semaphore_wait(sema, DISPATCH_TIME_FOREVER);
+}
+
+MT_EXPORT
+MT_API_AVAILABLE(mt_macos(10.14), mt_ios(12.0))
+void
+mtSharedEventSignal(MtSharedEvent *event, uint64_t val) {
+  ((id<MTLSharedEvent>) event).signaledValue = val;
+}

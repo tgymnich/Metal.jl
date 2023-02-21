@@ -87,3 +87,48 @@ Base.unsafe_convert(::Type{MTLSharedEventHandle}, evh::MtlSharedEventHandle) = e
 
 Base.:(==)(a::MtlSharedEventHandle, b::MtlSharedEventHandle) = a.handle == b.handle
 Base.hash(evh::MtlSharedEventHandle, h::UInt) = hash(evh.handle, h)
+
+function wait(ev::MtlSharedEvent, val)
+	mtSharedEventWait(ev, val)
+end
+
+function signal(ev::MtlSharedEvent, val)
+	mtSharedEventSignal(ev, val)
+end
+
+function isdone(ev::MtlAbstractEvent, val)
+    if ev.signaledValue >= val
+        return true
+    else
+        return false
+    end
+end
+
+function wait(ev::MtlSharedEvent, val)
+    # perform as much of the sync as possible without blocking in Metal.
+    # XXX: remove this using a yield callback, or by synchronizing on a dedicated thread?
+    nonblocking_synchronize(ev, val)
+
+	mtSharedEventWait(ev, val)
+end
+
+@inline function cooperative_wait(ev::MtlSharedEvent, val)
+    # fast path
+    isdone(ev, val) && return
+
+    # spin (initially without yielding to minimize latency)
+    spins = 0
+    while spins < 256
+        if spins < 32
+            ccall(:jl_cpu_pause, Cvoid, ())
+            # Temporary solution before we have gc transition support in codegen.
+            ccall(:jl_gc_safepoint, Cvoid, ())
+        else
+            yield()
+        end
+        isdone(ev, val) && return
+        spins += 1
+    end
+
+    return
+end
