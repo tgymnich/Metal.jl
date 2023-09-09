@@ -27,4 +27,6 @@ include("decomposition.jl")
 # matrix copy
 include("copy.jl")
 
+include("random.jl")
+
 end
