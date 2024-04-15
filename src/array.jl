@@ -1,6 +1,6 @@
 # host array
 
-export MtlArray, MtlVector, MtlMatrix, MtlVecOrMat, mtl
+export MtlArray, MtlVector, MtlMatrix, MtlVecOrMat, mtl, is_shared, is_managed, is_private
 
 function hasfieldcount(@nospecialize(dt))
     try
@@ -30,6 +30,8 @@ function check_eltype(T)
   Base.allocatedinline(T) || error("MtlArray only supports element types that are stored inline")
   Base.isbitsunion(T) && error("MtlArray does not yet support isbits-union arrays")
   contains_eltype(T, Float64) && error("Metal does not support Float64 values, try using Float32 instead")
+  contains_eltype(T, Int128) && error("Metal does not support Int128 values, try using Int64 instead")
+  contains_eltype(T, UInt128) && error("Metal does not support UInt128 values, try using UInt64 instead")
 end
 
 """
@@ -75,17 +77,39 @@ mutable struct MtlArray{T,N,S} <: AbstractGPUArray{T,N}
   function MtlArray{T,N}(data::DataRef{<:MTLBuffer}, dims::Dims{N};
                          maxsize::Int=prod(dims) * sizeof(T), offset::Int=0) where {T,N}
       check_eltype(T)
-      S = convert(MTL.MTLResourceOptions, data[].storageMode)
-      obj = new{T,N,S}(copy(data), maxsize, offset, dims)
+      storagemode = data[].storageMode
+      if storagemode == MTL.MTLStorageModeShared
+        obj = new{T,N,Shared}(copy(data), maxsize, offset, dims)
+      elseif storagemode == MTL.MTLStorageModeManaged
+        obj = new{T,N,Managed}(copy(data), maxsize, offset, dims)
+      elseif storagemode == MTL.MTLStorageModePrivate
+        obj = new{T,N,Private}(copy(data), maxsize, offset, dims)
+      elseif storagemode == MTL.MTLStorageModeMemoryless
+        obj = new{T,N,Memoryless}(copy(data), maxsize, offset, dims)
+      end
       finalizer(unsafe_free!, obj)
   end
+end
+
+# Create MtlArray from MTLBuffer
+function MtlArray{T,N}(buf::B, dims::Dims{N}; kwargs...) where {B<:MTLBuffer,T,N}
+  data = DataRef(buf) do buf
+    free(buf)
+  end
+  return MtlArray{T,N}(data, dims; kwargs...)
 end
 
 unsafe_free!(a::MtlArray) = GPUArrays.unsafe_free!(a.data)
 
 device(A::MtlArray) = A.data[].device
-storagemode(::MtlArray{T,N,S}) where {T,N,S} = S
 
+storagemode(x::MtlArray) = storagemode(typeof(x))
+storagemode(::Type{<:MtlArray{<:Any,<:Any,S}}) where {S} = S
+
+is_shared(a::MtlArray) = storagemode(a) == Shared
+is_managed(a::MtlArray) = storagemode(a) == Managed
+is_private(a::MtlArray) = storagemode(a) == Private
+is_memoryless(a::MtlArray) = storagemode(a) == Memoryless
 
 ## convenience constructors
 
@@ -94,7 +118,18 @@ const MtlMatrix{T,S} = MtlArray{T,2,S}
 const MtlVecOrMat{T,S} = Union{MtlVector{T,S},MtlMatrix{T,S}}
 
 # default to private memory
-const DefaultStorageMode = Private
+const DefaultStorageMode = let str = @load_preference("default_storage", "Private")
+  if str == "Private"
+    Private
+  elseif str == "Shared"
+    Shared
+  elseif str == "Managed"
+    Managed
+  else
+    error("unknown default storage mode: $default_storage")
+  end
+end
+
 MtlArray{T,N}(::UndefInitializer, dims::Dims{N}) where {T,N} =
   MtlArray{T,N,DefaultStorageMode}(undef, dims)
 
@@ -140,15 +175,43 @@ Base.elsize(::Type{<:MtlArray{T}}) where {T} = sizeof(T)
 Base.size(x::MtlArray) = x.dims
 Base.sizeof(x::MtlArray) = Base.elsize(x) * length(x)
 
-Base.pointer(x::MtlArray{T}) where {T} = Base.unsafe_convert(MtlPointer{T}, x)
-@inline function Base.pointer(x::MtlArray{T}, i::Integer) where T
-    Base.unsafe_convert(MtlPointer{T}, x) + Base._memory_offset(x, i)
+@inline function Base.pointer(x::MtlArray{T}, i::Integer=1; storage=Private) where {T}
+  PT = if storage == Private
+    MtlPtr{T}
+  elseif storage == Shared || storage == Managed
+    Ptr{T}
+  else
+    error("unknown memory type")
+  end
+  Base.unsafe_convert(PT, x) + Base._memory_offset(x, i)
 end
 
-Base.unsafe_convert(::Type{Ptr{S}}, x::MtlArray{T}) where {S, T} =
-  throw(ArgumentError("cannot take the CPU address of a $(typeof(x))"))
-Base.unsafe_convert(::Type{MtlPointer{T}}, x::MtlArray) where {T} =
-  MtlPointer{T}(x.data[], x.offset*Base.elsize(x))
+
+function Base.unsafe_convert(::Type{MtlPtr{T}}, x::MtlArray) where {T}
+   buf = x.data[]
+   MtlPtr{T}(buf, x.offset*Base.elsize(x))
+ end
+
+function Base.unsafe_convert(::Type{Ptr{S}}, x::MtlArray{T}) where {S, T}
+  if is_private(x)
+    throw(ArgumentError("cannot take the CPU address of a $(typeof(x))"))
+  end
+  synchronize()
+  buf = x.data[]
+  convert(Ptr{T}, buf) + x.offset*Base.elsize(x)
+end
+
+
+## indexing
+function Base.getindex(x::MtlArray{T,N,S}, I::Int) where {T,N,S<:Union{Shared,Managed}}
+  @boundscheck checkbounds(x, I)
+  unsafe_load(pointer(x, I; storage=S))
+end
+
+function Base.setindex!(x::MtlArray{T,N,S}, v, I::Int) where {T,N,S<:Union{Shared,Managed}}
+  @boundscheck checkbounds(x, I)
+  unsafe_store!(pointer(x, I; storage=S), v)
+end
 
 
 ## interop with other arrays
@@ -194,7 +257,7 @@ Base.convert(::Type{T}, x::T) where T <: MtlArray = x
 Base.unsafe_convert(::Type{<:Ptr}, x::MtlArray) =
   throw(ArgumentError("cannot take the host address of a $(typeof(x))"))
 
-Base.unsafe_convert(t::Type{MTL.MTLBuffer}, x::MtlArray) = x.data[]
+Base.unsafe_convert(::Type{MTL.MTLBuffer}, x::MtlArray) = x.data[]
 
 
 ## interop with ObjC libraries
@@ -203,9 +266,6 @@ Base.cconvert(::Type{<:id}, x::MtlArray) = x.data[]
 
 
 ## interop with CPU arrays
-
-Base.unsafe_wrap(t::Type{<:Array}, arr::MtlArray, dims; own=false) =
-  unsafe_wrap(t, arr.data[], dims; own=own)
 
 Base.collect(x::MtlArray{T,N}) where {T,N} = copyto!(Array{T,N}(undef, size(x)), x)
 
@@ -315,6 +375,8 @@ Adapt.adapt_storage(::Type{<:MtlArray{T}}, xs::AT) where {T, AT<:AbstractArray} 
   isbitstype(AT) ? xs : convert(MtlArray{T}, xs)
 Adapt.adapt_storage(::Type{<:MtlArray{T, N}}, xs::AT) where {T, N, AT<:AbstractArray} =
   isbitstype(AT) ? xs : convert(MtlArray{T,N}, xs)
+Adapt.adapt_storage(::Type{<:MtlArray{T, N, S}}, xs::AT) where {T, N, S, AT<:AbstractArray} =
+ isbitstype(AT) ? xs : convert(MtlArray{T,N,S}, xs)
 
 
 ## opinionated gpu array adaptor
@@ -326,15 +388,11 @@ struct MtlArrayAdaptor{S} end
 Adapt.adapt_storage(::MtlArrayAdaptor{S}, xs::AbstractArray{T,N}) where {T,N,S} =
   isbits(xs) ? xs : MtlArray{T,N,S}(xs)
 
-Adapt.adapt_storage(::MtlArrayAdaptor{S}, xs::AbstractArray{T,N}) where {T<:AbstractFloat,N,S} =
+Adapt.adapt_storage(::MtlArrayAdaptor{S}, xs::AbstractArray{T,N}) where {T<:Float64,N,S} =
   isbits(xs) ? xs : MtlArray{Float32,N,S}(xs)
 
-Adapt.adapt_storage(::MtlArrayAdaptor{S}, xs::AbstractArray{T,N}) where {T<:Complex{<:AbstractFloat},N,S} =
+Adapt.adapt_storage(::MtlArrayAdaptor{S}, xs::AbstractArray{T,N}) where {T<:Complex{<:Float64},N,S} =
   isbits(xs) ? xs : MtlArray{ComplexF32,N,S}(xs)
-
-# not for Float16
-Adapt.adapt_storage(::MtlArrayAdaptor{S}, xs::AbstractArray{T,N}) where {T<:Float16,N,S} =
-  isbits(xs) ? xs : MtlArray{T,N,S}(xs)
 
 """
     mtl(A; storage=Private)
@@ -355,32 +413,24 @@ Uses Adapt.jl to act inside some wrapper structs.
 
 ```jldoctests
 julia> mtl(ones(3)')
-1×3 adjoint(::MtlVector{Float32, Metal.MTL.MTLResourceStorageModePrivate}) with eltype Float32:
+1×3 adjoint(::MtlVector{Float32, Private}) with eltype Float32:
  1.0  1.0  1.0
 
 julia> mtl(zeros(1,3); storage=Shared)
-1×3 MtlMatrix{Float32, Metal.MTL.MTLResourceCPUCacheModeDefaultCache}:
+1×3 MtlMatrix{Float32, Shared}:
  0.0  0.0  0.0
 
 julia> mtl(1:3)
 1:3
 
 julia> MtlArray(1:3)
-3-element MtlVector{Int64, Metal.MTL.MTLResourceStorageModePrivate}:
- 1
- 2
- 3
-
-julia> mtl[1,2,3]
-3-element MtlVector{Int64, Metal.MTL.MTLResourceStorageModePrivate}:
+3-element MtlVector{Int64, Private}:
  1
  2
  3
 ```
 """
 @inline mtl(xs; storage=DefaultStorageMode) = adapt(MtlArrayAdaptor{storage}(), xs)
-
-Base.getindex(::typeof(mtl), xs...) = MtlArray([xs...])
 
 ## utilities
 
@@ -405,7 +455,7 @@ end
 
 ## derived arrays
 
-function GPUArrays.derive(::Type{T}, N::Int, a::MtlArray, dims::Dims, offset::Int) where {T}
+function GPUArrays.derive(::Type{T}, a::MtlArray, dims::Dims{N}, offset::Int) where {T,N}
   offset = (a.offset * Base.elsize(a)) ÷ sizeof(T) + offset
   MtlArray{T,N}(a.data, dims; a.maxsize, offset)
 end
@@ -436,11 +486,63 @@ Base.unsafe_convert(::Type{MTL.MTLBuffer}, A::PermutedDimsArray) =
 
 ## unsafe_wrap
 
+function Base.unsafe_wrap(::Type{<:Array}, arr::MtlArray{T,N}, dims=size(arr); own=false) where {T,N}
+  return unsafe_wrap(Array{T,N}, arr.data[], dims; own)
+end
+
 function Base.unsafe_wrap(t::Type{<:Array{T}}, buf::MTLBuffer, dims; own=false) where T
-    ptr = convert(Ptr{T}, contents(buf))
+    ptr = convert(Ptr{T}, buf)
     return unsafe_wrap(t, ptr, dims; own)
 end
 
-function Base.unsafe_wrap(t::Type{<:Array{T}}, ptr::MtlPointer{T}, dims; own=false) where T
-    return unsafe_wrap(t, contents(ptr), dims; own)
+function Base.unsafe_wrap(t::Type{<:Array{T}}, ptr::MtlPtr{T}, dims; own=false) where T
+    return unsafe_wrap(t, convert(Ptr{T}, ptr), dims; own)
+end
+
+function Base.unsafe_wrap(A::Type{<:MtlArray{T,N}}, arr::Array, dims=size(arr);
+                          dev=current_device(), kwargs...) where {T,N}
+  GC.@preserve arr begin
+    buf = MTLBuffer(dev, prod(dims) * sizeof(T), pointer(arr); nocopy=true, kwargs...)
+    return A(buf, Dims(dims))
+  end
+end
+
+## resizing
+
+"""
+  resize!(a::MtlVector, n::Integer)
+
+Resize `a` to contain `n` elements. If `n` is smaller than the current collection length,
+the first `n` elements will be retained. If `n` is larger, the new elements are not
+guaranteed to be initialized.
+"""
+function Base.resize!(A::MtlVector{T}, n::Integer) where T
+  # TODO: add additional space to allow for quicker resizing
+  maxsize = n * sizeof(T)
+  bufsize = if isbitstype(T)
+    maxsize
+  else
+    # type tag array past the data
+    maxsize + n
+  end
+
+  # replace the data with a new one. this 'unshares' the array.
+  # as a result, we can safely support resizing unowned buffers.
+  buf = alloc(device(A), bufsize; storage=storagemode(A))
+  ptr = MtlPtr{T}(buf)
+  m = min(length(A), n)
+  if m > 0
+    unsafe_copyto!(device(A), ptr, pointer(A), m)
+  end
+  new_data = DataRef(buf) do buf
+    free(buf)
+  end
+  unsafe_free!(A)
+
+  A.data = new_data
+  A.dims = (n,)
+  A.maxsize = maxsize
+  A.offset = 0
+
+  A
 end

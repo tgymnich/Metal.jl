@@ -9,10 +9,14 @@ dummy() = return
 @testset "launch configuration" begin
     @metal dummy()
 
+    threads = 1
+    @metal threads dummy()
     @metal threads=1 dummy()
     @metal threads=(1,1) dummy()
     @metal threads=(1,1,1) dummy()
 
+    groups = 1
+    @metal groups dummy()
     @metal groups=1 dummy()
     @metal groups=(1,1) dummy()
     @metal groups=(1,1,1) dummy()
@@ -47,7 +51,6 @@ end
     Metal.code_typed(dummy, Tuple{})
     Metal.code_warntype(devnull, dummy, Tuple{})
     Metal.code_llvm(devnull, dummy, Tuple{})
-    Metal.code_air(devnull, dummy, Tuple{})
     if macos_version() >= v"13"
         Metal.code_agx(devnull, dummy, Tuple{})
     end
@@ -56,7 +59,6 @@ end
     @device_code_typed @metal dummy()
     @device_code_warntype io=devnull @metal dummy()
     @device_code_llvm io=devnull @metal dummy()
-    @device_code_air io=devnull @metal dummy()
     if macos_version() >= v"13"
         @device_code_agx io=devnull @metal dummy()
     end
@@ -70,7 +72,6 @@ end
     # make sure kernel name aliases are preserved in the generated code
     @test occursin("dummy", sprint(io->(@device_code_llvm io=io optimize=false @metal dummy())))
     @test occursin("dummy", sprint(io->(@device_code_llvm io=io @metal dummy())))
-    @test occursin("dummy", sprint(io->(@device_code_air io=io @metal dummy())))
     if macos_version() >= v"13"
         @test occursin("dummy", sprint(io->(@device_code_agx io=io @metal dummy())))
     end
@@ -78,8 +79,8 @@ end
     # make sure invalid kernels can be partially reflected upon
     let
         invalid_kernel() = throw()
-        @test_throws Metal.KernelError @metal invalid_kernel()
-        @test_throws Metal.KernelError @grab_output @device_code_warntype @metal invalid_kernel()
+        @test_throws Metal.InvalidIRError @metal invalid_kernel()
+        @test_throws Metal.InvalidIRError @grab_output @device_code_warntype @metal invalid_kernel()
         out, err = @grab_output begin
             try
                 @device_code_warntype @metal invalid_kernel()

@@ -1,80 +1,37 @@
 @testset "profiling" begin
+
+# determine if we can even run these tests
+run_tests = false
+if parse(Bool, get(ENV, "CI", "false"))
+    @warn "Skipping profiling tests on CI due to sandboxing issues"
+elseif !success(`xctrace version`)
+    @warn "Skipping profiling tests because xctrace is not available; please install Xcode first"
+else
+    version_output = chomp(read(`xctrace version`, String))
+    m = match(r"xctrace version (\d+).(\d+)", version_output)
+    if m === nothing
+        error("Could not parse xctrace version output:\n$version_output")
+    else
+        xcode_version = VersionNumber(parse(Int, m.captures[1]), parse(Int, m.captures[2]))
+        if MTL.is_m1(current_device()) && macos_version() >= v"14.4" && xcode_version < v"15.3"
+            @warn "Skipping profiling tests because of an M1-related bug on macOS 14.4 and Xcode < 15.3; please upgrade Xcode first"
+        else
+            run_tests = true
+        end
+    end
+end
+
+if run_tests
 mktempdir() do tmpdir
+cd(tmpdir) do
 
-# Verify Metal capture is enabled via environment variable
-@test haskey(ENV, "METAL_CAPTURE_ENABLED")
-@test ENV["METAL_CAPTURE_ENABLED"]=="1"
-
-function tester(A)
-    idx = thread_position_in_grid_1d()
-    A[idx] = Int(5)
-    return nothing
-end
-
-# Capture Manager
-manager = MTLCaptureManager()
-@test manager.isCapturing isa Bool
-
-# Capture Descriptor
-desc = MTLCaptureDescriptor()
-# Capture Object
-@test desc.captureObject == nothing
-cmdq = global_queue(current_device())
-desc.captureObject = cmdq
-@test desc.captureObject == cmdq
-dev = current_device()
-desc.captureObject = dev
-@test desc.captureObject == dev
-
-# Capture Destination
-@test desc.destination == MTL.MTLCaptureDestinationDeveloperTools
-desc.destination = MTL.MTLCaptureDestinationGPUTraceDocument
-@test desc.destination == MTL.MTLCaptureDestinationGPUTraceDocument
-
-# Output URL
-@test desc.outputURL == nothing
-path = joinpath(tmpdir, "test.gputrace")
-desc.outputURL = NSFileURL(path)
-@test desc.outputURL == NSFileURL(path)
-
-# Capture Scope
-queue = MTLCommandQueue(current_device())
-default_scope = manager.defaultCaptureScope
-@test default_scope == nothing
-new_scope = MTLCaptureScope(@objc [manager::id{MTLCaptureManager} newCaptureScopeWithCommandQueue:queue::id{MTLCommandQueue}]::id{MTLCaptureScope})
-@test new_scope.commandQueue == queue
-@test new_scope.device == current_device()
-@test new_scope.label == nothing
-new_label = "Metal.jl profiling test"
-new_scope.label = new_label
-@test new_scope.label == new_label
-
-# Assign new scope
-manager.defaultCaptureScope = new_scope
-@test manager.defaultCaptureScope == new_scope
-
-# Capturing
-bufferA = MtlArray{Float32,1,Shared}(undef, tuple(4))
-
-@test !isdir(path)
-@test manager.isCapturing == false
-startCapture(manager, desc)
-@test manager.isCapturing
-@test_throws ErrorException startCapture(manager, desc)
-@metal threads=4 tester(bufferA)
-stopCapture(manager)
-@test manager.isCapturing == false
-@test isdir(path)
-release(new_scope)
-
-# Profile Macro
-cd(path) do
-    Metal.@profile @metal threads=4 tester(bufferA)
-    @test isdir("julia_capture_1.gputrace")
-    Metal.@profile capture=current_device() @metal threads=4 tester(bufferA)
-    @test isdir("julia_capture_2.gputrace")
-    @test_throws ArgumentError Metal.@profile @metal threads=4 tester(bufferA)
+@testset "macro" begin
+    Metal.@profile identity(nothing)
+    @test isdir("julia_1.trace")
 end
 
 end
+end
+end
+
 end

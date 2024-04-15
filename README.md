@@ -30,8 +30,8 @@ if you want to use it. PRs are very welcome!
 ## Requirements
 
 -  Mac device with M-series chip
--  Julia 1.8
--  macOS 13 (Ventura)
+-  Julia 1.8-1.10
+-  macOS 13 (Ventura) or 14 (Sonoma)
 
 These requirements are fairly strict, and are due to our limited development
 resources (manpower, hardware). Technically, they can be relaxed. If you are
@@ -72,7 +72,7 @@ Toolchain:
 
 Julia packages:
 - Metal.jl: 0.5.0
-- Metal_LLVM_Tools_jll: 0.5.1+0
+- LLVMDowngrader_jll: 0.1.0+0
 
 1 device:
 - Apple M2 Max (64.000 KiB allocated)
@@ -125,39 +125,6 @@ julia> Array(c)
  3
 ```
 
-## Profiling
-
-This package also supports profiling GPU execution for later visualization with Apple's
-Xcode tools. The easiest way to generate a GPU report is to use the `Metal.@profile` macro
-as seen below. To profile GPU code from a Julia process, you must set the
-`METAL_CAPTURE_ENABLED` environment variable before importing Metal.jl. On the first Metal
-command detected, you should get a message stating "Metal GPU Frame Capture Enabled" if the
-variable was set correctly:
-
-```julia
-julia> ENV["METAL_CAPTURE_ENABLED"] = 1
-julia> using Metal
-
-julia> function vadd(a, b, c)
-           i = thread_position_in_grid_1d()
-           c[i] = a[i] + b[i]
-           return
-       end
-
-julia> a = MtlArray([1]); b = MtlArray([2]); c = similar(a);
-... Metal GPU Frame Capture Enabled
-
-julia> Metal.@profile @metal threads=length(c) vadd(a, b, c);
-[ Info: GPU frame capture saved to julia_capture_1.gputrace
-```
-
-This will generate a `.gputrace` folder in the current directory. To view the profile, open
-the folder with Xcode.
-
-Note: Xcode is a large install, and there are some peculiarities with viewing Julia-created
-GPU traces. It's recommended to only have one trace open at a time, and the shader profiler
-may fail to start.
-
 
 ## Metal API wrapper
 
@@ -174,17 +141,6 @@ julia> dev = MTLDevice(1)
 julia> dev.name
 NSString("Apple M1 Pro")
 ```
-
-
-## Hacking
-
-Metal.jl relies on a custom [LLVM with an AIR
-back-end](https://github.com/JuliaGPU/llvm-metal), provided as a JLL. Normally, this JLLis
-built on [Yggdrasil](https://github.com/JuliaPackaging/Yggdrasil/blob/master/M/Metal_LLVM_Tools/build_tarballs.jl).
-If you need to make changes to the LLVM back-end, have a look at the `build_llvm.jl` in the `deps/` folder. This
-scripts builds a local version of the LLVM back-end, and configures a local preference such
-that any environment depending on the corresponding JLLs will pick-up the modified version
-(i.e., do `julia --project` in a clone of `Metal.jl`).
 
 
 ## Acknowledgements

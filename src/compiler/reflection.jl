@@ -36,7 +36,7 @@ function code_agx(io::IO, @nospecialize(func), @nospecialize(types),
     code_agx(io, job)
 end
 
-function code_agx(io::IO, job::MetalCompilerJob)
+@autoreleasepool function code_agx(io::IO, job::MetalCompilerJob)
     if !job.config.kernel
         error("Can only generate AGX code for kernel functions")
     end
@@ -58,7 +58,7 @@ function code_agx(io::IO, job::MetalCompilerJob)
     bin = MTLBinaryArchive(current_device(), bin_desc)
     add_functions!(bin, pipeline_desc)
 
-    code = mktempdir() do dir
+    mktempdir() do dir
         # serialize the archive to a file
         binary = joinpath(dir, "kernel.macho")
         write(binary, bin)
@@ -77,12 +77,11 @@ function code_agx(io::IO, job::MetalCompilerJob)
             # disassemble the function
             first || println(io)
             println(io, "$name:")
-            disassemble(io, file)
+            print(io, disassemble(file))
 
             first = false
         end
     end
-
 end
 
 @enum GPUMachineType::UInt32 begin
@@ -151,17 +150,20 @@ function extract_gpu_code(f, binary)
     return
 end
 
-function disassemble(io::IO, path)
+function disassemble(path)
+    io = IOBuffer()
     disassembler = joinpath(only(readdir(artifact"applegpu"; join=true)), "disassemble.py")
     run(pipeline(`$(python()) $disassembler $path`, stdout=io))
-    return
+    return String(take!(io))
 end
 
 code_agx(@nospecialize(func), @nospecialize(types); kwargs...) =
     code_agx(stdout, func, types; kwargs...)
 
+const code_native = code_agx
+
 # forward the rest to GPUCompiler with an appropriate CompilerJob
-for method in (:code_typed, :code_warntype, :code_llvm, :code_native)
+for method in (:code_typed, :code_warntype, :code_llvm)
     # only code_typed doesn't take a io argument
     args = method === :code_typed ? (:job,) : (:io, :job)
 
@@ -179,15 +181,13 @@ for method in (:code_typed, :code_warntype, :code_llvm, :code_native)
     end
 end
 
-const code_air = code_native
-
 
 #
 # @device_code_* functions
 #
 
 export @device_code_lowered, @device_code_typed, @device_code_warntype,
-       @device_code_llvm, @device_code_air, @device_code_agx, @device_code
+       @device_code_llvm, @device_code_native, @device_code_agx, @device_code
 
 """
     @device_code_agx [io::IO=stdout, ...] ex
@@ -205,12 +205,13 @@ macro device_code_agx(ex...)
     GPUCompiler.emit_hooked_compilation(hook, ex...)
 end
 
+const var"@device_code_native" = var"@device_code_agx"
+
 # forward to GPUCompiler
 @eval $(Symbol("@device_code_lowered")) = $(getfield(GPUCompiler, Symbol("@device_code_lowered")))
 @eval $(Symbol("@device_code_typed")) = $(getfield(GPUCompiler, Symbol("@device_code_typed")))
 @eval $(Symbol("@device_code_warntype")) = $(getfield(GPUCompiler, Symbol("@device_code_warntype")))
 @eval $(Symbol("@device_code_llvm")) = $(getfield(GPUCompiler, Symbol("@device_code_llvm")))
-@eval $(Symbol("@device_code_air")) = $(getfield(GPUCompiler, Symbol("@device_code_native")))
 @eval $(Symbol("@device_code")) = $(getfield(GPUCompiler, Symbol("@device_code")))
 
 

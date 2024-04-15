@@ -51,8 +51,15 @@ function runtests(f, name)
 
         # process results
         cpu_rss = Sys.maxrss()
-        passes,fails,error,broken,c_passes,c_fails,c_errors,c_broken =
-            Test.get_test_counts(data[1])
+        if VERSION >= v"1.11.0-DEV.1529"
+            tc = Test.get_test_counts(data[1])
+            passes,fails,error,broken,c_passes,c_fails,c_errors,c_broken =
+                tc.passes, tc.fails, tc.errors, tc.broken, tc.cumulative_passes,
+                tc.cumulative_fails, tc.cumulative_errors, tc.cumulative_broken
+        else
+            passes,fails,errors,broken,c_passes,c_fails,c_errors,c_broken =
+                Test.get_test_counts(data[1])
+        end
         if data[1].anynonpass == false
             data = ((passes+c_passes,broken+c_broken),
                     data[2],
@@ -104,17 +111,5 @@ macro on_device(ex...)
         end
     end)
 end
-
-# helper function for sinking a value to prevent the callee from getting optimized away
-@inline sink(i::Int32) =
-    Base.llvmcall("""%slot = alloca i32
-                     store volatile i32 %0, i32* %slot
-                     %value = load volatile i32, i32* %slot
-                     ret i32 %value""", Int32, Tuple{Int32}, i)
-@inline sink(i::Int64) =
-    Base.llvmcall("""%slot = alloca i64
-                     store volatile i64 %0, i64* %slot
-                     %value = load volatile i64, i64* %slot
-                     ret i64 %value""", Int64, Tuple{Int64}, i)
 
 nothing # File is loaded via a remotecall to "include". Ensure it returns "nothing".

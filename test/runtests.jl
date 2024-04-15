@@ -42,11 +42,6 @@ do_quickfail, _ = extract_flag!(ARGS, "--quickfail")
 
 include("setup.jl")     # make sure everything is precompiled
 @info "System information:\n" * sprint(io->Metal.versioninfo(io))
-metallib_as_version = let
-    metallib_as = Metal.Metal_LLVM_Tools_jll.Metal_LLVM_Tools_jll.metallib_as()
-    read(`$metallib_as --version`, String)
-end
-@info "Using Metal LLVM back-end from $(dirname(Metal.Metal_LLVM_Tools_jll.Metal_LLVM_Tools_jll.metallib_as_path)):\n" * metallib_as_version
 @info "Running $jobs tests in parallel. If this is too many, specify the `--jobs` argument to the tests, or set the JULIA_CPU_THREADS environment variable."
 
 # choose tests
@@ -80,6 +75,10 @@ for (rootpath, dirs, files) in walkdir(@__DIR__)
 end
 ## GPUArrays testsuite
 for name in keys(TestSuite.tests)
+    if Metal.DefaultStorageMode != Private && name == "indexing scalar"
+        # GPUArrays' scalar indexing tests assume that indexing is not supported
+        continue
+    end
     push!(tests, "gpuarrays$(Base.Filesystem.path_separator)$name")
     test_runners["gpuarrays$(Base.Filesystem.path_separator)$name"] = ()->TestSuite.tests[name](MtlArray)
 end
@@ -230,8 +229,8 @@ try
                 while length(tests) > 0
                     test = popfirst!(tests)
 
-                    # the `profiling` test is special, and needs an environment variable set
-                    if test == "profiling"
+                    # the `capturing` test is special, and needs an environment variable set
+                    if test == "capturing"
                         recycle_worker(p)
                         p = addworker(1; env=["METAL_CAPTURE_ENABLED"=>1])[1]
                     end
@@ -242,15 +241,17 @@ try
                     end
                     wrkr = p
 
-                    local resp
-
                     # catch timeouts
                     pid = remotecall_fetch(getpid, wrkr)
-                    timer = Timer(300) do _
+                    timer = Timer(480) do _
                         @warn "Test timed out: $test"
-                        t1 = rmprocs(wrkr, waitfor=0)
 
-                        # rmprocs may fail if the worker is stuck, so fall back to kill
+                        # trigger a stacktrace and profile dump
+                        ccall(:kill, Cint, (Cint, Cint), pid, #=SIGINFO=# 29)
+                        sleep(5)
+
+                        # exit the worker (which may fail, so fall back to killing it)
+                        t1 = rmprocs(wrkr, waitfor=0)
                         t2 = Timer(10) do _
                             @warn "Couldn't kill worker $wrkr, killing process $pid forcefully"
                             ccall(:kill, Cint, (Cint, Cint), pid, Base.SIGTERM)
@@ -260,12 +261,12 @@ try
                             wait(t1)
                             close(t3)
                         end
-
                         wait(t1)
                         close(t2)
                     end
 
                     # run the test
+                    local resp
                     running_tests[test] = now()
                     try
                         resp = remotecall_fetch(runtests, wrkr, test_runners[test], test)
@@ -298,8 +299,8 @@ try
                         end
                     end
 
-                    # make sure the `profiling` test environment variable doesn't leak
-                    if test == "profiling"
+                    # make sure the `capturing` test environment variable doesn't leak
+                    if test == "capturing"
                         recycle_worker(p)
                         p = addworker(1; env=["METAL_CAPTURE_ENABLED"=>0])[1]
                     end

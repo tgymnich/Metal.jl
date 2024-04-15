@@ -35,7 +35,7 @@ Adapt.adapt_storage(::KA.CPU, a::MtlArray) = convert(Array, a)
 
 function KA.copyto!(::MetalBackend, A::MtlArray{T}, B::MtlArray{T}) where T
     if device(dest) == device(src)
-        GC.@preserve A B unsafe_copyto!(device(A), pointer(A), pointer(B), length(A); async=true)
+        GC.@preserve A B copyto!(A, B)
         return A
     else
         error("Copy between different devices not implemented")
@@ -43,12 +43,12 @@ function KA.copyto!(::MetalBackend, A::MtlArray{T}, B::MtlArray{T}) where T
 end
 
 function KA.copyto!(::MetalBackend, A::Array{T}, B::MtlArray{T}) where T
-    GC.@preserve A B unsafe_copyto!(device(B), pointer(A), pointer(B), length(A); async=true)
+    GC.@preserve A B copyto!(A, B)
     return A
 end
 
 function KA.copyto!(::MetalBackend, A::MtlArray{T}, B::Array{T}) where T
-    GC.@preserve A B unsafe_copyto!(device(A), pointer(A), pointer(B), length(A); async=true)
+    GC.@preserve A B copyto!(A, B)
     return A
 end
 
@@ -111,15 +111,15 @@ function (obj::KA.Kernel{MetalBackend})(args...; ndrange=nothing, workgroupsize=
         ctx = KA.mkcontext(obj, ndrange, iterspace)
     end
 
-    nblocks = length(KA.blocks(iterspace))
+    groups = length(KA.blocks(iterspace))
     threads = length(KA.workitems(iterspace))
 
-    if nblocks == 0
+    if groups == 0
         return nothing
     end
 
     # Launch kernel
-    kernel(ctx, args...; threads=threads, groups=nblocks)
+    kernel(ctx, args...; threads, groups)
     return nothing
 end
 
@@ -143,7 +143,7 @@ end
 end
 
 @device_override @inline function KA.__index_Group_Cartesian(ctx)
-    @inbounds blocks(KA.__iterspace(ctx))[threadgroup_position_in_grid_1d()]
+    @inbounds KA.blocks(KA.__iterspace(ctx))[threadgroup_position_in_grid_1d()]
 end
 
 @device_override @inline function KA.__index_Global_Cartesian(ctx)

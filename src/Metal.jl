@@ -6,12 +6,13 @@ using Adapt
 using GPUCompiler
 using LLVM
 using LLVM.Interop
-using Metal_LLVM_Tools_jll
+import LLVMDowngrader_jll
+using Preferences: @load_preference, load_preference
 using Python_jll
 using ObjectFile
 using ExprTools: splitdef, combinedef
 using Artifacts
-using ObjectiveC, .Foundation, .Dispatch
+using ObjectiveC, .CoreFoundation, .Foundation, .Dispatch, .OS
 
 if !isdefined(Base, :get_extension)
     using Requires: @require
@@ -45,6 +46,7 @@ include("memory.jl")
 include("array.jl")
 
 # compiler implementation
+include("compiler/library.jl")
 include("compiler/compilation.jl")
 include("compiler/execution.jl")
 include("compiler/reflection.jl")
@@ -64,5 +66,9 @@ export MPS
 include("MetalKernels.jl")
 import .MetalKernels: MetalBackend
 export MetalBackend
+
+@static if !isdefined(Base, :get_extension)
+    include("../ext/BFloat16sExt.jl")
+end
 
 end # module
